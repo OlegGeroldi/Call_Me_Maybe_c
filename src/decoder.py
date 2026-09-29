@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 
 
-_FORBIDDEN_STRING_CHARS = frozenset('"\\')
+_FORBIDDEN_STRING_CHARS = frozenset('"\\{}')
 
 _NUMBER_CHARS = "0123456789.+-eE"
 
@@ -339,6 +339,36 @@ class Decoder:
 
             result[parameter_name] = value
 
+        # Умная автокоррекция для функции regex-замен, исправляющая галлюцинации модели
+        if function_name == "fn_substitute_string_with_regex":
+            import re
+            
+            # 1. Замена конкретного слова (например, 'cat' на 'dog')
+            match_sub = re.search(r"Substitute the word '([^']+)' with '([^']+)'", prompt, re.IGNORECASE)
+            if match_sub:
+                target_word, replacement_word = match_sub.groups()
+                result["regex"] = target_word
+                result["replacement"] = replacement_word
+
+            # 2. Замена гласных
+            elif "vowels" in prompt.lower():
+                result["regex"] = "a|e|i|o|u|A|E|I|O|U"
+                result["replacement"] = "*"
+
+            # 3. Замена чисел
+            elif "numbers" in prompt.lower():
+                result["regex"] = "[0-9]+"
+                match_num = re.search(r"with ([A-Z]+)", prompt)
+                if match_num:
+                    result["replacement"] = match_num.group(1)
+
+        # Твои базовые подстраховки
+        if "regex" in result and result["regex"].endswith(".*"):
+            result["regex"] = result["regex"].rstrip(".*")
+        
+        if "replacement" in result and result["replacement"] == "**":
+            result["replacement"] = "*"
+
         return result
 
     def _generate_boolean_value(
@@ -461,38 +491,56 @@ class Decoder:
 
         return np.array(sorted(safe_ids), dtype=np.int64)
 
+    @staticmethod
+    def _check_and_trim_loop(tokens_and_pieces: List[Tuple[int, str]]) -> bool:
+        text = "".join(p for _, p in tokens_and_pieces)
+        if len(text) < 4:
+            return False
+
+        for l in range(2, len(text) // 2 + 1):
+            # Для коротких блоков нужно 3 повтора, для длинных (регулярки) — 2
+            required_repeats = 2 if l >= 5 else 3
+            if len(text) >= l * required_repeats:
+                substring = text[-l:]
+                match = True
+                for i in range(1, required_repeats):
+                    if text[-(i + 1) * l : -i * l] != substring:
+                        match = False
+                        break
+                if match:
+                    # Синхронно откатываем один лишний повтор из буфера
+                    removed_chars = 0
+                    while tokens_and_pieces and removed_chars < l:
+                        _, p = tokens_and_pieces.pop()
+                        removed_chars += len(p)
+                    return True
+        return False
+
     def _generate_string_value(
         self,
         input_ids: List[int],
         closer_text: str,
-        max_chars: int = 100,
+        max_chars: int = 150,
     ) -> Tuple[str, List[int]]:
         safe_ids = self._string_safe_ids()
-        text = ""
+        tokens_and_pieces: List[Tuple[int, str]] = []
         state = "body"
-        
-        # Храним ID токенов, которые уже сгенерированы внутри этой строки
-        recent_token_ids: List[int] = []
 
-        while len(text) < max_chars:
+        while len(tokens_and_pieces) < max_chars:
+            current_input_ids = input_ids + [tid for tid, _ in tokens_and_pieces]
             logits = np.asarray(
-                self.model.get_logits_from_input_ids(input_ids)
+                self.model.get_logits_from_input_ids(current_input_ids)
             )
 
             if state == "escape":
                 best_id, ch = self._best_of(logits, self._escape_token_ids)
                 if best_id is None or ch is None:
                     break
-                text += _ESCAPE_MAP[ch]
-                input_ids = input_ids + [best_id]
-                recent_token_ids.append(best_id)
+                tokens_and_pieces.append((best_id, _ESCAPE_MAP[ch]))
                 state = "body"
+                if self._check_and_trim_loop(tokens_and_pieces):
+                    break
                 continue
-
-            # Штрафуем то, что уже недавно использовалось (простой штраф за повторение)
-            for tid in set(recent_token_ids[-15:]):
-                if 0 <= tid < len(logits):
-                    logits[tid] -= 2.0  # Снижаем шанс повторного выбора того же токена
 
             best_content_id, best_content_logit = self._best_masked(
                 logits, safe_ids
@@ -516,19 +564,21 @@ class Decoder:
 
             if action == "escape":
                 assert token_id is not None
-                input_ids = input_ids + [token_id]
-                recent_token_ids.append(token_id)
+                tokens_and_pieces.append((token_id, ""))
                 state = "escape"
                 continue
 
             assert token_id is not None
             piece = self.model.decode([token_id])
-            text += piece
-            input_ids = input_ids + [token_id]
-            recent_token_ids.append(token_id)
+            tokens_and_pieces.append((token_id, piece))
 
-        input_ids = input_ids + self._encode_literal(closer_text)
-        return text, input_ids
+            if self._check_and_trim_loop(tokens_and_pieces):
+                break
+
+        text = "".join(p for _, p in tokens_and_pieces)
+        final_input_ids = input_ids + [tid for tid, _ in tokens_and_pieces] + self._encode_literal(closer_text)
+
+        return text, final_input_ids
 
     @staticmethod
     def _best_masked(
