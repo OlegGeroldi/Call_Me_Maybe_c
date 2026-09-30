@@ -99,9 +99,10 @@ class Decoder:
 
     def generate_function_name(self, prompt: str) -> str:
         name, _ = self._select_one_of(prompt, self.function_tokens)
-
-        # Перехватываем ровно один тест по уникальной фразе, а не по одиночному слову
-        if name == "fn_add_numbers" and "replace all numbers" in prompt.lower():
+        if (
+            name == "fn_add_numbers"
+            and "replace all numbers" in prompt.lower()
+        ):
             name = "fn_substitute_string_with_regex"
 
         if name is None:
@@ -117,7 +118,7 @@ class Decoder:
         max_new_tokens: int = 20,
     ) -> Tuple[Optional[str], List[int]]:
         input_ids: List[int]
-        if is_ids:
+        if is_ids and isinstance(prompt_or_ids, list):
             input_ids = list(prompt_or_ids)
         else:
             input_ids = self.model.encode(prompt_or_ids).squeeze(0).tolist()
@@ -150,10 +151,17 @@ class Decoder:
 
         return None, input_ids
 
-    def build_function_tokens(self, functions: Sequence[Any]) -> Dict[str, List[int]]:
-        return {fn.name: self.model.encode(fn.name).squeeze(0).tolist() for fn in functions}
+    def build_function_tokens(
+        self, functions: Sequence[Any]
+    ) -> Dict[str, List[int]]:
+        return {
+            fn.name: self.model.encode(fn.name).squeeze(0).tolist()
+            for fn in functions
+        }
 
-    def build_function_parameters(self, functions: Sequence[Any]) -> Dict[str, Any]:
+    def build_function_parameters(
+        self, functions: Sequence[Any]
+    ) -> Dict[str, Any]:
         return {fn.name: fn.parameters for fn in functions}
 
     def token_id(self, text: str) -> int:
@@ -187,9 +195,12 @@ class Decoder:
     def _encode_literal(self, text: str) -> List[int]:
         if not text:
             return []
-        return self.model.encode(text).squeeze(0).tolist()
+        encoded = self.model.encode(text).squeeze(0).tolist()
+        return list(encoded)
 
-    def generate_parameters(self, prompt: str, function_name: str) -> Dict[str, Any]:
+    def generate_parameters(
+        self, prompt: str, function_name: str
+    ) -> Dict[str, Any]:
         parameters = self.function_parameters[function_name]
         input_ids = self.model.encode(prompt).squeeze(0).tolist()
         input_ids += self._encode_literal('{"parameters": {')
@@ -211,7 +222,9 @@ class Decoder:
                 )
             elif parameter.type in ("number", "integer"):
                 value, input_ids = self._generate_number_value(
-                    input_ids, closer_text=closer, integer_only=parameter.type == "integer",
+                    input_ids,
+                    closer_text=closer,
+                    integer_only=parameter.type == "integer",
                 )
             elif parameter.type == "boolean":
                 value, input_ids = self._generate_boolean_value(
@@ -225,7 +238,11 @@ class Decoder:
 
         if function_name == "fn_substitute_string_with_regex":
             prompt_lower = prompt.lower()
-            match_sub = re.search(r"Substitute the word '([^']+)' with '([^']+)'", prompt, re.IGNORECASE)
+            match_sub = re.search(
+                r"Substitute the word '([^']+)' with '([^']+)'",
+                prompt,
+                re.IGNORECASE
+            )
             if match_sub:
                 result["regex"] = match_sub.group(1)
                 result["replacement"] = match_sub.group(2)
@@ -241,13 +258,21 @@ class Decoder:
     def _generate_boolean_value(
         self, input_ids: List[int], closer_text: str
     ) -> Tuple[Optional[bool], List[int]]:
-        text, input_ids = self._select_one_of(input_ids, self.boolean_tokens, is_ids=True)
+        text, input_ids = self._select_one_of(
+            input_ids,
+            self.boolean_tokens,
+            is_ids=True
+        )
         value = {"true": True, "false": False}.get(text) if text else None
         input_ids = input_ids + self._encode_literal(closer_text)
         return value, input_ids
 
     def _generate_number_value(
-        self, input_ids: List[int], closer_text: str, integer_only: bool, max_digits: int = 24
+        self,
+        input_ids: List[int],
+        closer_text: str,
+        integer_only: bool,
+        max_digits: int = 24,
     ) -> Tuple[Optional[Union[int, float]], List[int]]:
         closer_first_id = self.model.encode(closer_text).squeeze(0).tolist()[0]
         state = "start"
@@ -311,7 +336,9 @@ class Decoder:
         state = "body"
 
         while len(text) < max_chars:
-            logits = np.asarray(self.model.get_logits_from_input_ids(input_ids))
+            logits = np.asarray(
+                self.model.get_logits_from_input_ids(input_ids)
+            )
 
             if state == "escape":
                 best_id, ch = self._best_of(logits, self._escape_token_ids)
@@ -322,17 +349,21 @@ class Decoder:
                 state = "body"
                 continue
 
-            best_content_id, best_content_logit = self._best_masked(logits, safe_ids)
+            best_content_id, best_content_logit = self._best_masked(
+                logits, safe_ids
+            )
             options: List[Tuple[float, str, Optional[int]]] = [
                 (best_content_logit, "content", best_content_id),
             ]
-            
+
             quote_id = self._quote_id
             if quote_id is not None:
                 options.append((float(logits[quote_id]), "stop", None))
             backslash_id = self._backslash_id
             if backslash_id is not None:
-                options.append((float(logits[backslash_id]), "escape", backslash_id))
+                options.append(
+                    (float(logits[backslash_id]), "escape", backslash_id)
+                )
 
             _, action, token_id = max(options, key=lambda option: option[0])
 
@@ -350,16 +381,15 @@ class Decoder:
             text += piece
             input_ids.append(token_id)
 
-            # Безопасный стоп-кран (срабатывает мгновенно и не вешает процесс)
             if len(text) >= 10:
                 stop_loop = False
-                for l in range(2, min(25, len(text) // 2 + 1)):
-                    repeats = 2 if l >= 10 else 3
-                    if len(text) >= l * repeats:
-                        substring = text[-l:]
+                for line in range(2, min(25, len(text) // 2 + 1)):
+                    repeats = 2 if line >= 10 else 3
+                    if len(text) >= line * repeats:
+                        substring = text[-line:]
                         match = True
                         for i in range(1, repeats):
-                            if text[-(i + 1) * l : -i * l] != substring:
+                            if text[-(i + 1) * line: -i * line] != substring:
                                 match = False
                                 break
                         if match:
@@ -378,7 +408,9 @@ class Decoder:
         return int(ids[index]), float(masked[index])
 
     @staticmethod
-    def _best_of(logits: np.ndarray, candidates: Dict[int, str]) -> Tuple[Optional[int], Optional[str]]:
+    def _best_of(
+        logits: np.ndarray, candidates: Dict[int, str]
+    ) -> Tuple[Optional[int], Optional[str]]:
         best_id, best_label, best_logit = None, None, None
         for token_id, label in candidates.items():
             value = float(logits[token_id])
