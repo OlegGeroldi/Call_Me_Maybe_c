@@ -94,14 +94,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         started = time.perf_counter()
 
         prompt = (
-        f"{context}\n"
-        f"Examples:\n"
-        f"- 'Replace vowels with asterisks' -> regex: 'a|e|i|o|u', replacement: '*'\n"
-        f"- 'Substitute cat with dog' -> regex: 'cat', replacement: 'dog'\n\n"
-        f"User request:\n"
-        f"{user_prompt}\n\n"
-        f"The best matching function is:\n"
-    )
+            f"{context}\n"
+            f"Examples:\n"
+            f"- 'Replace vowels with asterisks' -> "
+            f"regex: 'a|e|i|o|u', replacement: '*'\n"
+            f"- 'Substitute cat with dog' -> "
+            f"regex: 'cat', replacement: 'dog'\n\n"
+            f"User request:\n"
+            f"{user_prompt}\n\n"
+            f"The best matching function is:\n"
+        )
+
         try:
             model_output = decoder.generate_function_name(prompt)
             parameters = decoder.generate_parameters(prompt, model_output)
